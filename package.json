@@ -1,0 +1,19 @@
+{
+  "name": "fchat",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^8.0.33",
+    "@types/qs": "^6.5.0",
+    "tslint": "^5.7.0",
+    "typescript": "^2.5.3"
+  },
+  "dependencies": {
+    "axios": "^0.16.2",
+    "qs": "^6.5.1"
+  },
+  "scripts": {
+    "build": "tsc"
+  }
+}
