@@ -60,6 +60,13 @@ export default class Connection implements Interfaces.Connection {
         socket.onError((error: Error) => {
             for(const handler of this.errorHandlers) handler(error);
         });
+        return new Promise<void>((resolve) => {
+            const handler = () => {
+                resolve();
+                this.offEvent('connected', handler);
+            };
+            this.onEvent('connected', handler);
+        });
     }
 
     close(): void {
@@ -77,7 +84,11 @@ export default class Connection implements Interfaces.Connection {
             data.ticket = this.ticket = await this.ticketProvider();
             res = <{error: string}>(await queryApi(endpoint, data)).data;
         }
-        if(res.error !== '') throw new Error(res.error);
+        if(res.error !== '') {
+            const error = new Error(res.error);
+            (<Error & {request: true}>error).request = true;
+            throw error;
+        }
         return res;
     }
 

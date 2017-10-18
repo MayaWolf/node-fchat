@@ -55,7 +55,7 @@ export namespace Connection {
     export type ServerCommands = {
         ADL: {ops: ReadonlyArray<string>},
         AOP: {character: string},
-        BRO: {message: string, character: string},
+        BRO: {message: string, character?: string},
         CBU: {operator: string, channel: string, character: string},
         CDS: {channel: string, description: string},
         CHA: {channels: ReadonlyArray<{name: string, mode: Channel.Mode, characters: number}>},
@@ -134,7 +134,7 @@ export namespace Connection {
     export interface Connection {
         readonly character: string
         readonly vars: Vars
-        connect(character: string): void
+        connect(character: string): Promise<void>
         close(): void
         onMessage<K extends keyof ServerCommands>(type: K, handler: CommandHandler<K>): void
         offMessage<K extends keyof ServerCommands>(type: K, handler: CommandHandler<K>): void
@@ -180,7 +180,7 @@ export namespace Character {
 export type Character = Character.Character;
 
 export namespace Channel {
-    export type EventHandler = (type: 'join' | 'leave', channel: Channel) => void;
+    export type EventHandler = (type: 'join' | 'leave', channel: Channel, member?: Member) => void;
 
     export interface State {
         readonly officialChannels: {readonly [key: string]: (ListItem | undefined)};
