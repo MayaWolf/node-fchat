@@ -21,39 +21,50 @@ export default class Connection implements Interfaces.Connection {
     private reconnectTimer: NodeJS.Timer;
     private ticketProvider: Interfaces.TicketProvider;
     private reconnectDelay = 0;
+    private isReconnect = false;
 
-    constructor(private readonly socketProvider: new() => WebSocketConnection, private readonly account: string,
+    constructor(private readonly clientName: string, private readonly version: string,
+                private readonly socketProvider: new() => WebSocketConnection, private readonly account: string,
                 ticketProvider: Interfaces.TicketProvider | string) {
         this.ticketProvider = typeof ticketProvider === 'string' ? async() => this.getTicket(ticketProvider) : ticketProvider;
     }
 
     async connect(character: string): Promise<void> {
         this.cleanClose = false;
-        const isReconnect = this.character === character;
+        this.isReconnect = this.character === character;
         this.character = character;
-        this.ticket = await this.ticketProvider();
-        await this.invokeHandlers('connecting', isReconnect);
+        try {
+            this.ticket = await this.ticketProvider();
+        } catch(e) {
+            for(const handler of this.errorHandlers) handler(<Error>e);
+            await this.invokeHandlers('closed', true);
+            this.reconnect();
+            return;
+        }
+        await this.invokeHandlers('connecting', this.isReconnect);
+        if(this.cleanClose) {
+            this.cleanClose = false;
+            await this.invokeHandlers('closed', false);
+            return;
+        }
         const socket = this.socket = new this.socketProvider();
         socket.onOpen(() => {
             this.send('IDN', {
                 account: this.account,
                 character: this.character,
-                cname: 'F-Chat',
-                cversion: '3.0',
+                cname: this.clientName,
+                cversion: this.version,
                 method: 'ticket',
                 ticket: this.ticket
             });
         });
-        socket.onMessage((msg: string) => {
+        socket.onMessage(async(msg: string) => {
             const type = <keyof Interfaces.ServerCommands>msg.substr(0, 3);
             const data = msg.length > 6 ? <object>JSON.parse(msg.substr(4)) : undefined;
-            this.handleMessage(type, data);
+            return this.handleMessage(type, data);
         });
         socket.onClose(async() => {
-            if(!this.cleanClose) {
-                setTimeout(async() => this.connect(this.character), this.reconnectDelay);
-                this.reconnectDelay = this.reconnectDelay >= 30000 ? 60000 : this.reconnectDelay >= 10000 ? 30000 : 10000;
-            }
+            if(!this.cleanClose) this.reconnect();
             this.socket = undefined;
             await this.invokeHandlers('closed', !this.cleanClose);
         });
@@ -69,20 +80,25 @@ export default class Connection implements Interfaces.Connection {
         });
     }
 
+    private reconnect(): void {
+        this.reconnectTimer = setTimeout(async() => this.connect(this.character), this.reconnectDelay);
+        this.reconnectDelay = this.reconnectDelay >= 30000 ? 60000 : this.reconnectDelay >= 10000 ? 30000 : 10000;
+    }
+
     close(): void {
         clearTimeout(this.reconnectTimer);
         this.cleanClose = true;
         if(this.socket !== undefined) this.socket.close();
     }
 
-    async queryApi(endpoint: string, data?: {account?: string, ticket?: string}): Promise<object> {
+    async queryApi<T = object>(endpoint: string, data?: {account?: string, ticket?: string}): Promise<T> {
         if(data === undefined) data = {};
         data.account = this.account;
         data.ticket = this.ticket;
-        let res = <{error: string}>(await queryApi(endpoint, data)).data;
+        let res = <T & {error: string}>(await queryApi(endpoint, data)).data;
         if(res.error === 'Invalid ticket.' || res.error === 'Your login ticket has expired (five minutes) or no ticket requested.') {
             data.ticket = this.ticket = await this.ticketProvider();
-            res = <{error: string}>(await queryApi(endpoint, data)).data;
+            res = <T & {error: string}>(await queryApi(endpoint, data)).data;
         }
         if(res.error !== '') {
             const error = new Error(res.error);
@@ -109,13 +125,13 @@ export default class Connection implements Interfaces.Connection {
     }
 
     onMessage<K extends keyof Interfaces.ServerCommands>(type: K, handler: Interfaces.CommandHandler<K>): void {
-        let handlers: (Interfaces.CommandHandler<K>[] | undefined) = this.messageHandlers[type];
+        let handlers = <Interfaces.CommandHandler<K>[] | undefined>this.messageHandlers[type];
         if(handlers === undefined) handlers = this.messageHandlers[type] = [];
         handlers.push(handler);
     }
 
     offMessage<K extends keyof Interfaces.ServerCommands>(type: K, handler: Interfaces.CommandHandler<K>): void {
-        const handlers: (Interfaces.CommandHandler<K>[] | undefined) = this.messageHandlers[type];
+        const handlers = <Interfaces.CommandHandler<K>[] | undefined>this.messageHandlers[type];
         if(handlers === undefined) return;
         handlers.splice(handlers.indexOf(handler), 1);
     }
@@ -126,7 +142,11 @@ export default class Connection implements Interfaces.Connection {
     }
 
     //tslint:disable:no-unsafe-any no-any
-    protected handleMessage<T extends keyof Interfaces.ServerCommands>(type: T, data: any): void {
+    protected async handleMessage<T extends keyof Interfaces.ServerCommands>(type: T, data: any): Promise<void> {
+        const time = new Date();
+        const handlers = <Interfaces.CommandHandler<T>[] | undefined>this.messageHandlers[type];
+        if(handlers !== undefined)
+            for(const handler of handlers) await handler(data, time);
         switch(type) {
             case 'VAR':
                 this.vars[data.variable] = data.value;
@@ -144,14 +164,10 @@ export default class Connection implements Interfaces.Connection {
                 break;
             case 'NLN':
                 if(data.identity === this.character) {
-                    this.invokeHandlers('connected', this.reconnectDelay !== 0); //tslint:disable-line:no-floating-promises
+                    await this.invokeHandlers('connected', this.isReconnect);
                     this.reconnectDelay = 0;
                 }
         }
-        const time = new Date();
-        const handlers: Interfaces.CommandHandler<T>[] | undefined = this.messageHandlers[type];
-        if(handlers !== undefined)
-            for(const handler of handlers) handler(data, time);
     }
 
     //tslint:enable
