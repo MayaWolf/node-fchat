@@ -22,10 +22,11 @@ function sortMember(this: void | never, array: SortableMember[], member: Sortabl
         if(member.character.isChatOp && !other.character.isChatOp) break;
         if(other.rank > member.rank) continue;
         if(member.rank > other.rank) break;
-        if(other.character.isFriend && !member.character.isFriend) continue;
-        if(member.character.isFriend && !other.character.isFriend) break;
-        if(other.character.isBookmarked && !member.character.isBookmarked) continue;
-        if(member.character.isBookmarked && !other.character.isBookmarked) break;
+        if(!member.character.isFriend) {
+            if(other.character.isFriend) continue;
+            if(other.character.isBookmarked && !member.character.isBookmarked) continue;
+            if(member.character.isBookmarked && !other.character.isBookmarked) break;
+        } else if(!other.character.isFriend) break;
         if(member.key < other.key) break;
     }
     array.splice(i, 0, member);
@@ -85,6 +86,7 @@ class State implements Interfaces.State {
     joinedChannels: Channel[] = [];
     joinedMap: {[key: string]: Channel | undefined} = {};
     handlers: Interfaces.EventHandler[] = [];
+    lastRequest = 0;
 
     constructor(private connection: Connection) {
     }
@@ -109,13 +111,19 @@ class State implements Interfaces.State {
     getChannel(id: string): Channel | undefined {
         return this.joinedMap[id.toLowerCase()];
     }
+
+    requestChannelsIfNeeded(maxAge: number): void {
+        if(this.lastRequest + maxAge > Date.now()) return;
+        this.lastRequest = Date.now();
+        this.connection.send('CHA');
+        this.connection.send('ORS');
+    }
 }
 
 let state: State;
 
 export default function(this: void, connection: Connection, characters: Character.State): Interfaces.State {
     state = new State(connection);
-    let getChannelTimer: NodeJS.Timer | undefined;
     let rejoin: string[] | undefined;
     connection.onEvent('connecting', (isReconnect) => {
         if(isReconnect && rejoin === undefined) rejoin = Object.keys(state.joinedMap);
@@ -127,16 +135,6 @@ export default function(this: void, connection: Connection, characters: Characte
             queuedJoin(rejoin);
             rejoin = undefined;
         }
-        const getChannels = () => {
-            connection.send('CHA');
-            connection.send('ORS');
-        };
-        getChannels();
-        if(getChannelTimer !== undefined) clearInterval(getChannelTimer);
-        getChannelTimer = setInterval(getChannels, 60000);
-    });
-    connection.onEvent('closed', () => {
-        if(getChannelTimer !== undefined) clearInterval(getChannelTimer);
     });
 
     connection.onMessage('CHA', (data) => {
@@ -216,7 +214,6 @@ export default function(this: void, connection: Connection, characters: Characte
     connection.onMessage('COA', (data) => {
         const channel = state.getChannel(data.channel);
         if(channel === undefined) return state.leave(data.channel);
-        channel.opList.push(data.character);
         const member = channel.members[data.character];
         if(member === undefined || member.rank === Interfaces.Rank.Owner) return;
         member.rank = Interfaces.Rank.Op;
@@ -231,7 +228,6 @@ export default function(this: void, connection: Connection, characters: Characte
     connection.onMessage('COR', (data) => {
         const channel = state.getChannel(data.channel);
         if(channel === undefined) return state.leave(data.channel);
-        channel.opList.splice(channel.opList.indexOf(data.character), 1);
         const member = channel.members[data.character];
         if(member === undefined || member.rank === Interfaces.Rank.Owner) return;
         member.rank = Interfaces.Rank.Member;
@@ -270,5 +266,13 @@ export default function(this: void, connection: Connection, characters: Characte
     };
     connection.onMessage('AOP', globalHandler);
     connection.onMessage('DOP', globalHandler);
+    connection.onMessage('RTB', (data) => {
+        if(data.type !== 'trackadd' && data.type !== 'trackrem' && data.type !== 'friendadd' && data.type !== 'friendremove') return;
+        for(const key in state.joinedMap) {
+            const channel = state.joinedMap[key]!;
+            const member = channel.members[data.name];
+            if(member !== undefined) channel.reSortMember(member);
+        }
+    });
     return state;
 }

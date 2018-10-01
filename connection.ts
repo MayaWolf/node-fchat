@@ -1,9 +1,9 @@
-import Axios, {AxiosResponse} from 'axios';
+import Axios, {AxiosError, AxiosResponse} from 'axios';
 import * as qs from 'qs';
 import {Connection as Interfaces, WebSocketConnection} from './interfaces';
 
 const fatalErrors = [2, 3, 4, 9, 30, 31, 33, 39, 40, 62, -4];
-const dieErrors = [9, 30, 31, 39];
+const dieErrors = [9, 30, 31, 39, 40];
 
 async function queryApi(this: void, endpoint: string, data: object): Promise<AxiosResponse> {
     return Axios.post(`https://www.f-list.net/json/api/${endpoint}`, qs.stringify(data));
@@ -19,7 +19,7 @@ export default class Connection implements Interfaces.Connection {
     private ticket = '';
     private cleanClose = false;
     private reconnectTimer: NodeJS.Timer | undefined;
-    private ticketProvider: Interfaces.TicketProvider;
+    private readonly ticketProvider: Interfaces.TicketProvider;
     private reconnectDelay = 0;
     private isReconnect = false;
 
@@ -31,24 +31,34 @@ export default class Connection implements Interfaces.Connection {
 
     async connect(character: string): Promise<void> {
         this.cleanClose = false;
-        this.isReconnect = this.character === character;
+        if(this.character !== character) this.isReconnect = false;
         this.character = character;
         try {
             this.ticket = await this.ticketProvider();
         } catch(e) {
-            for(const handler of this.errorHandlers) handler(<Error>e);
-            await this.invokeHandlers('closed', true);
-            this.reconnect();
-            return;
+            if(this.reconnectTimer !== undefined)
+                if((<AxiosError>e).request !== undefined) this.reconnect();
+                else await this.invokeHandlers('closed', false);
+            return this.invokeErrorHandlers(<Error>e, true);
         }
-        await this.invokeHandlers('connecting', this.isReconnect);
+        try {
+            await this.invokeHandlers('connecting', this.isReconnect);
+        } catch(e) {
+            await this.invokeHandlers('closed', false);
+            return this.invokeErrorHandlers(<Error>e);
+        }
         if(this.cleanClose) {
             this.cleanClose = false;
             await this.invokeHandlers('closed', false);
             return;
         }
-        const socket = this.socket = new this.socketProvider();
-        socket.onOpen(() => {
+        try {
+            this.socket = new this.socketProvider();
+        } catch(e) {
+            await this.invokeHandlers('closed', false);
+            return this.invokeErrorHandlers(<Error>e, true);
+        }
+        this.socket.onOpen(() => {
             this.send('IDN', {
                 account: this.account,
                 character: this.character,
@@ -58,26 +68,17 @@ export default class Connection implements Interfaces.Connection {
                 ticket: this.ticket
             });
         });
-        socket.onMessage(async(msg: string) => {
+        this.socket.onMessage(async(msg: string) => {
             const type = <keyof Interfaces.ServerCommands>msg.substr(0, 3);
             const data = msg.length > 6 ? <object>JSON.parse(msg.substr(4)) : undefined;
             return this.handleMessage(type, data);
         });
-        socket.onClose(async() => {
+        this.socket.onClose(async() => {
             if(!this.cleanClose) this.reconnect();
             this.socket = undefined;
             await this.invokeHandlers('closed', !this.cleanClose);
         });
-        socket.onError((error: Error) => {
-            for(const handler of this.errorHandlers) handler(error);
-        });
-        return new Promise<void>((resolve) => {
-            const handler = () => {
-                resolve();
-                this.offEvent('connected', handler);
-            };
-            this.onEvent('connected', handler);
-        });
+        this.socket.onError((error: Error) => this.invokeErrorHandlers(error, true));
     }
 
     private reconnect(): void {
@@ -87,8 +88,13 @@ export default class Connection implements Interfaces.Connection {
 
     close(): void {
         if(this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = undefined;
         this.cleanClose = true;
         if(this.socket !== undefined) this.socket.close();
+    }
+
+    get isOpen(): boolean {
+        return this.socket !== undefined;
     }
 
     async queryApi<T = object>(endpoint: string, data?: {account?: string, ticket?: string}): Promise<T> {
@@ -156,16 +162,18 @@ export default class Connection implements Interfaces.Connection {
                 break;
             case 'ERR':
                 if(fatalErrors.indexOf(data.number) !== -1) {
-                    const error = new Error(data.message);
-                    for(const handler of this.errorHandlers) handler(error);
-                    if(dieErrors.indexOf(data.number) !== -1) this.close();
-                    else this.socket!.close();
+                    this.invokeErrorHandlers(new Error(data.message), true);
+                    if(dieErrors.indexOf(data.number) !== -1) {
+                        this.close();
+                        this.character = '';
+                    } else this.socket!.close();
                 }
                 break;
             case 'NLN':
                 if(data.identity === this.character) {
                     await this.invokeHandlers('connected', this.isReconnect);
                     this.reconnectDelay = 0;
+                    this.isReconnect = true;
                 }
         }
     }
@@ -183,5 +191,10 @@ export default class Connection implements Interfaces.Connection {
         const handlers = this.connectionHandlers[type];
         if(handlers === undefined) return;
         for(const handler of handlers) await handler(isReconnect);
+    }
+
+    private invokeErrorHandlers(error: Error, request: boolean = false): void {
+        if(request) (<Error & {request: true}>error).request = true;
+        for(const handler of this.errorHandlers) handler(error);
     }
 }

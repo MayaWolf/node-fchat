@@ -42,6 +42,7 @@ export namespace Connection {
         RLL: {channel: string, dice: 'bottle' | string} | {recipient: string, dice: 'bottle' | string},
         RMO: {channel: string, mode: Channel.Mode},
         RST: {channel: string, status: 'public' | 'private'},
+        SCP: {action: 'add' | 'remove', character: string}
         RWD: {character: string},
         SFC: {action: 'report', report: string, tab?: string, logid: number} | {action: 'confirm', callid: number},
         STA: {status: Character.Status, statusmsg: string},
@@ -104,8 +105,9 @@ export namespace Connection {
             type: 'grouprequest' | 'bugreport' | 'helpdeskticket' | 'helpdeskreply' | 'featurerequest',
             name: string, id: number, title?: string
         } | {type: 'trackadd' | 'trackrem' | 'friendadd' | 'friendremove' | 'friendrequest', name: string},
-        SFC: {action: 'confirm', moderator: string, character: string, timestamp: string, tab: string, logid: number} |
-            {callid: number, action: 'report', report: string, timestamp: string, character: string, tab: string, logid: number},
+        SFC: {action: 'confirm', moderator: string, character: string, timestamp: string, tab: string, logid: number} | {
+            callid: number, action: 'report', report: string, timestamp: string, character: string, tab: string, logid: number, old?: true
+        },
         STA: {status: Character.Status, character: string, statusmsg: string},
         SYS: {message: string, channel?: string},
         TPN: {character: string, status: Character.TypingStatus},
@@ -123,10 +125,10 @@ export namespace Connection {
         readonly chat_max: number
         readonly priv_max: number
         readonly lfrp_max: number
-        //readonly cds_max: number
+        readonly cds_max: number
         readonly lfrp_flood: number
         readonly msg_flood: number
-        //readonly sta_flood: number
+        readonly sta_flood: number
         readonly permissions: number
         readonly icon_blacklist: ReadonlyArray<string>
     }
@@ -134,7 +136,8 @@ export namespace Connection {
     export interface Connection {
         readonly character: string
         readonly vars: Vars
-        connect(character: string): Promise<void>
+        readonly isOpen: boolean
+        connect(character: string): void
         close(): void
         onMessage<K extends keyof ServerCommands>(type: K, handler: CommandHandler<K>): void
         offMessage<K extends keyof ServerCommands>(type: K, handler: CommandHandler<K>): void
@@ -192,6 +195,7 @@ export namespace Channel {
         onEvent(handler: EventHandler): void
         getChannelItem(id: string): ListItem | undefined
         getChannel(id: string): Channel | undefined
+        requestChannelsIfNeeded(maxAge: number): void;
     }
 
     export const enum Rank {
